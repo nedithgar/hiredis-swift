@@ -28,9 +28,11 @@ struct RedisIntegrationTests: Sendable {
       protocolVersion: protocolVersion,
       authenticationMode: authenticationMode
     ) { connection in
+      try await expectNegotiatedProtocol(protocolVersion, on: connection)
       #expect(try await connection.ping() == "PONG")
 
       try await connection.reconnect()
+      try await expectNegotiatedProtocol(protocolVersion, on: connection)
       #expect(try await connection.ping() == "PONG")
     }
   }
@@ -129,6 +131,48 @@ struct RedisIntegrationTests: Sendable {
       #expect(await connection.isConnected)
       #expect(try await connection.ping() == "PONG")
       _ = try await connection.command(arguments: [Data("DEL".utf8), key])
+    }
+  }
+
+  private func expectNegotiatedProtocol(
+    _ expectedVersion: HiredisProtocolVersion,
+    on connection: HiredisConnection
+  ) async throws {
+    let response = try await connection.command(arguments: [Data("HELLO".utf8)])
+    let actualVersion = try #require(
+      helloProtocolVersion(from: response.reply),
+      "HELLO did not report the connection's negotiated protocol: \(response.reply)"
+    )
+
+    #expect(actualVersion == Int64(expectedVersion.rawValue))
+  }
+
+  private func helloProtocolVersion(from reply: HiredisReply) -> Int64? {
+    let protocolKey = HiredisReply.bulkString(Data("proto".utf8))
+
+    switch reply {
+    case .array(let values):
+      guard
+        let keyIndex = stride(from: 0, to: values.count, by: 2)
+          .first(where: { values[$0] == protocolKey }),
+        values.indices.contains(keyIndex + 1),
+        case .integer(let version) = values[keyIndex + 1]
+      else {
+        return nil
+      }
+      return version
+
+    case .map(let entries):
+      guard
+        let entry = entries.first(where: { $0.key == protocolKey }),
+        case .integer(let version) = entry.value
+      else {
+        return nil
+      }
+      return version
+
+    default:
+      return nil
     }
   }
 
