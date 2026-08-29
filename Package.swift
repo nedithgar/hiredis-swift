@@ -38,6 +38,10 @@ let package = Package(
       name: "HiredisTests",
       dependencies: ["Hiredis"]
     ),
+    .testTarget(
+      name: "HiredisIntegrationTests",
+      dependencies: ["Hiredis"]
+    ),
   ],
   swiftLanguageModes: [.v6],
   cLanguageStandard: .c99
