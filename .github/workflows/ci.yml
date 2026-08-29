@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swiftpm:
+    name: SwiftPM (${{ matrix.configuration }})
+    runs-on: macos-26
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration:
+          - debug
+          - release
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Report toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Describe package
+        if: matrix.configuration == 'debug'
+        run: swift package describe
+
+      - name: Build
+        run: swift build --configuration "${{ matrix.configuration }}"
+
+      - name: Test
+        run: swift test --configuration "${{ matrix.configuration }}"
+
+  xcode:
+    name: Xcode scheme
+    runs-on: macos-26
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Report toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Build package scheme
+        run: >-
+          xcodebuild
+          -scheme hiredis-swift
+          -destination 'generic/platform=macOS'
+          -jobs 1
+          CODE_SIGNING_ALLOWED=NO
+          build
