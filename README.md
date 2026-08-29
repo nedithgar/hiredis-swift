@@ -273,9 +273,16 @@ swift test -c release
 xcodebuild -scheme hiredis-swift -destination 'generic/platform=macOS' build
 ```
 
-The test target uses Swift Testing and a process-local loopback TCP server. It
-covers deterministic RESP2/RESP3 fixtures, all supported reply kinds, embedded
-null bytes, protocol/server errors, configuration validation, repeated reply
-cleanup, close/reconnect/cancellation/timeout behavior, serialization, and
-credential redaction. No normal test reads environment variables or contacts a
-real server; this package currently contains no real-server integration test.
+The normal test target uses Swift Testing and a process-local loopback TCP
+server. It covers deterministic RESP2/RESP3 fixtures, all supported reply kinds,
+embedded null bytes, protocol/server errors, configuration validation, repeated
+reply cleanup, close/reconnect/cancellation/timeout behavior, serialization, and
+credential redaction.
+
+`HiredisIntegrationTests` adds a small real-Redis contract suite for
+authentication, RESP2/RESP3 negotiation, reconnects, database selection,
+binary-safe storage, RESP3 aggregate replies, and real server errors. The suite
+is compiled by normal verification but is intentionally skipped unless both
+GitHub Actions and the dedicated Redis integration workflow enable it. That
+workflow installs and owns a disposable loopback Redis process on its ephemeral
+runner; local builds never install, launch, or contact Redis.

@@ -1,0 +1,100 @@
+name: Redis integration
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: redis-integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  redis-integration:
+    name: Real Redis contract
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      HIREDIS_RUN_REDIS_INTEGRATION: "1"
+      HIREDIS_REDIS_HOST: "127.0.0.1"
+      HIREDIS_REDIS_PORT: "6380"
+      HIREDIS_REDIS_PASSWORD: "hiredis-swift-ci-password"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Report toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Install Redis on the ephemeral runner
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          brew install redis
+          redis-server --version
+
+      - name: Start disposable Redis
+        run: |
+          redis_data_dir="$RUNNER_TEMP/hiredis-swift-redis"
+          redis_pid_file="$RUNNER_TEMP/hiredis-swift-redis.pid"
+          redis_log_file="$RUNNER_TEMP/hiredis-swift-redis.log"
+          mkdir -p "$redis_data_dir"
+
+          redis-server \
+            --bind "$HIREDIS_REDIS_HOST" \
+            --port "$HIREDIS_REDIS_PORT" \
+            --protected-mode yes \
+            --save "" \
+            --appendonly no \
+            --requirepass "$HIREDIS_REDIS_PASSWORD" \
+            --dir "$redis_data_dir" \
+            --pidfile "$redis_pid_file" \
+            --logfile "$redis_log_file" \
+            --daemonize yes
+
+          for attempt in {1..30}; do
+            if redis-cli \
+              --host "$HIREDIS_REDIS_HOST" \
+              --port "$HIREDIS_REDIS_PORT" \
+              --pass "$HIREDIS_REDIS_PASSWORD" \
+              --no-auth-warning \
+              ping | grep -qx PONG; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Redis did not become ready after 30 seconds" >&2
+          cat "$redis_log_file" >&2
+          exit 1
+
+      - name: Run real Redis integration tests
+        run: swift test --filter RedisIntegrationTests
+
+      - name: Stop disposable Redis
+        if: always()
+        run: |
+          if command -v redis-cli >/dev/null 2>&1; then
+            redis-cli \
+              --host "$HIREDIS_REDIS_HOST" \
+              --port "$HIREDIS_REDIS_PORT" \
+              --pass "$HIREDIS_REDIS_PASSWORD" \
+              --no-auth-warning \
+              shutdown nosave || true
+          fi
+
+      - name: Report Redis log on failure
+        if: failure()
+        run: |
+          redis_log_file="$RUNNER_TEMP/hiredis-swift-redis.log"
+          if [[ -f "$redis_log_file" ]]; then
+            cat "$redis_log_file"
+          fi
