@@ -15,6 +15,51 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  version:
+    name: Release version
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Read package version
+        id: version
+        shell: bash
+        run: |
+          if [[ ! -f VERSION ]]; then
+            echo "VERSION is missing" >&2
+            exit 1
+          fi
+
+          version_line_count="$(awk 'END { print NR }' VERSION)"
+          version="$(< VERSION)"
+          semver_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
+
+          if [[ "$version_line_count" -ne 1 || -z "$version" || "$version" == *$'\r'* ]]; then
+            echo "VERSION must contain exactly one non-empty line" >&2
+            exit 1
+          fi
+
+          if [[ ! "$version" =~ $semver_pattern ]]; then
+            echo "VERSION must contain a valid semantic version without a tag prefix" >&2
+            exit 1
+          fi
+
+          prerelease=false
+          if [[ "${version%%+*}" == *-* ]]; then
+            prerelease=true
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
   swiftpm:
     name: SwiftPM (${{ matrix.configuration }})
     runs-on: macos-26
@@ -67,3 +112,94 @@ jobs:
           -jobs 1
           CODE_SIGNING_ALLOWED=NO
           build
+
+  redis-integration:
+    name: Redis integration
+    uses: ./.github/workflows/redis-integration.yml
+
+  release:
+    name: Tag and release
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs:
+      - version
+      - swiftpm
+      - xcode
+      - redis-integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+
+    steps:
+      - name: Detect existing tag and release
+        id: release_state
+        uses: actions/github-script@v9
+        env:
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = process.env.RELEASE_TAG;
+
+            let tagExists = true;
+            try {
+              await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              tagExists = false;
+            }
+
+            let releaseExists = true;
+            try {
+              await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              releaseExists = false;
+            }
+
+            core.setOutput('tag_exists', String(tagExists));
+            core.setOutput('release_exists', String(releaseExists));
+            core.summary.addRaw(
+              `Version ${tag}: tag ${tagExists ? 'exists' : 'is missing'}; ` +
+              `release ${releaseExists ? 'exists' : 'is missing'}.`
+            );
+            await core.summary.write();
+
+      - name: Create version tag
+        if: steps.release_state.outputs.tag_exists != 'true'
+        uses: actions/github-script@v9
+        env:
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = process.env.RELEASE_TAG;
+
+            await github.rest.git.createRef({
+              owner,
+              repo,
+              ref: `refs/tags/${tag}`,
+              sha: context.sha,
+            });
+
+      - name: Create GitHub release
+        if: steps.release_state.outputs.release_exists != 'true'
+        uses: actions/github-script@v9
+        env:
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+          RELEASE_IS_PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = process.env.RELEASE_TAG;
+
+            await github.rest.repos.createRelease({
+              owner,
+              repo,
+              tag_name: tag,
+              name: tag,
+              generate_release_notes: true,
+              prerelease: process.env.RELEASE_IS_PRERELEASE === 'true',
+            });
