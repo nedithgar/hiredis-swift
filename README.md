@@ -40,15 +40,18 @@ Then depend on the library product:
 )
 ```
 
-If this repository is published at a remote URL in the future, consumers will
-be able to replace the path dependency with a normal URL and semantic version
-requirement:
+For a remote dependency, use this repository's URL and a published semantic
+version requirement:
 
 ```swift
-.package(url: "https://example.com/owner/hiredis-swift.git", from: "0.1.0")
+.package(url: "https://github.com/nedithgar/hiredis-swift.git", from: "0.1.0")
 ```
 
-That URL is illustrative. This repository has not been published.
+The package's current release version lives in `VERSION`, which is the single
+source of truth for release automation. After the SwiftPM, Xcode, and real Redis
+contract jobs pass on `main`, CI creates the matching semantic-version tag and
+GitHub release only when they do not already exist. Bump `VERSION` to publish a
+new release; leaving it unchanged makes the release job a no-op.
 
 ## Connect and ping
 
@@ -283,6 +286,7 @@ credential redaction.
 authentication, RESP2/RESP3 negotiation, reconnects, database selection,
 binary-safe storage, RESP3 aggregate replies, and real server errors. The suite
 is compiled by normal verification but is intentionally skipped unless both
-GitHub Actions and the dedicated Redis integration workflow enable it. That
-workflow installs and owns a disposable loopback Redis process on its ephemeral
-runner; local builds never install, launch, or contact Redis.
+GitHub Actions and the reusable Redis integration workflow enable it. CI calls
+that workflow as a required release gate; it installs and owns a disposable
+loopback Redis process on its ephemeral runner. Local builds never install,
+launch, or contact Redis.
