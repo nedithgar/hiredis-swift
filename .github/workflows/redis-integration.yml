@@ -61,11 +61,9 @@ jobs:
             --daemonize yes
 
           for attempt in {1..30}; do
-            if redis-cli \
-              --host "$HIREDIS_REDIS_HOST" \
-              --port "$HIREDIS_REDIS_PORT" \
-              --pass "$HIREDIS_REDIS_PASSWORD" \
-              --no-auth-warning \
+            if REDISCLI_AUTH="$HIREDIS_REDIS_PASSWORD" redis-cli \
+              -h "$HIREDIS_REDIS_HOST" \
+              -p "$HIREDIS_REDIS_PORT" \
               ping | grep -qx PONG; then
               exit 0
             fi
@@ -83,11 +81,9 @@ jobs:
         if: always()
         run: |
           if command -v redis-cli >/dev/null 2>&1; then
-            redis-cli \
-              --host "$HIREDIS_REDIS_HOST" \
-              --port "$HIREDIS_REDIS_PORT" \
-              --pass "$HIREDIS_REDIS_PASSWORD" \
-              --no-auth-warning \
+            REDISCLI_AUTH="$HIREDIS_REDIS_PASSWORD" redis-cli \
+              -h "$HIREDIS_REDIS_HOST" \
+              -p "$HIREDIS_REDIS_PORT" \
               shutdown nosave || true
           fi
 
