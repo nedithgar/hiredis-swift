@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 
@@ -5,6 +6,70 @@ import Testing
 
 @Suite("Live connection behavior")
 struct ConnectionTests {
+  enum RefusedTCPFamily: Sendable {
+    case ipv4
+    case ipv6
+
+    var addressFamily: Int32 { self == .ipv4 ? AF_INET : AF_INET6 }
+    var hostname: String { self == .ipv4 ? "127.0.0.1" : "::1" }
+  }
+
+  @Test(
+    "Refused sockets preserve the original connect error across repeated attempts",
+    arguments: [RefusedTCPFamily.ipv4, .ipv6]
+  )
+  func refusedConnectionPreservesSocketCause(family: RefusedTCPFamily) async throws {
+    let port = try makeClosedTCPPort(family: family)
+    let configuration = try HiredisConfiguration(
+      hostname: family.hostname,
+      port: port,
+      connectionTimeout: .seconds(2),
+      commandTimeout: .seconds(2)
+    )
+    let connection = HiredisConnection(configuration: configuration)
+    let expected = HiredisError.connection(
+      operation: .connect,
+      message: String(cString: strerror(ECONNREFUSED))
+    )
+    for _ in 0..<2 {
+      do {
+        try await connection.connect()
+        Issue.record("The closed loopback port must refuse connections")
+        await connection.close()
+      } catch let error as HiredisError {
+        #expect(error == expected)
+      } catch {
+        Issue.record("Expected a hiredis connect error, received \(error)")
+      }
+      #expect(await connection.isConnected == false)
+    }
+    await connection.close()
+  }
+
+  @Test(
+    "A real connect timeout retains its operation and closes the failed context",
+    arguments: [RefusedTCPFamily.ipv4, .ipv6]
+  )
+  func connectionTimeoutPreservesOperation(family: RefusedTCPFamily) async throws {
+    let endpoint = try makeBoundTCPPort(family: family)
+    defer { Darwin.close(endpoint.descriptor) }
+    let configuration = try HiredisConfiguration(
+      hostname: family.hostname,
+      port: endpoint.port,
+      connectionTimeout: .milliseconds(100),
+      commandTimeout: .seconds(2)
+    )
+    let connection = HiredisConnection(configuration: configuration)
+    // Darwin leaves this bound, unlistened endpoint pending until the connect deadline.
+    for _ in 0..<2 {
+      await #expect(throws: HiredisError.timeout(.connect)) {
+        try await connection.connect()
+      }
+      #expect(await connection.isConnected == false)
+    }
+    await connection.close()
+  }
+
   @Test("PING and raw commands use binary-safe argv framing")
   func pingAndBinaryCommand() async throws {
     let binaryValue = Data([0x61, 0x00, 0x62, 0x00, 0x63])
@@ -550,6 +615,67 @@ struct ConnectionTests {
     #expect(description.contains("<redacted>"))
     await connection.close()
     _ = try await serverResult
+  }
+
+  private func makeClosedTCPPort(family: RefusedTCPFamily) throws -> Int {
+    let endpoint = try makeBoundTCPPort(family: family)
+    Darwin.close(endpoint.descriptor)
+    // Another process could claim this released port; unexpected success must fail the test.
+    return endpoint.port
+  }
+
+  private func makeBoundTCPPort(family: RefusedTCPFamily) throws -> (descriptor: Int32, port: Int) {
+    let descriptor = Darwin.socket(family.addressFamily, SOCK_STREAM, 0)
+    guard descriptor >= 0 else {
+      throw MockServerError.systemCall(name: "socket", code: errno)
+    }
+    var transfersDescriptor = false
+    defer { if !transfersDescriptor { Darwin.close(descriptor) } }
+
+    let port: Int
+    switch family {
+    case .ipv4:
+      var address = sockaddr_in()
+      address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+      address.sin_family = sa_family_t(AF_INET)
+      address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+      let bound = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+          Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+      }
+      guard bound == 0 else { throw MockServerError.systemCall(name: "bind", code: errno) }
+      var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+      let named = withUnsafeMutablePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+          getsockname(descriptor, $0, &length)
+        }
+      }
+      guard named == 0 else { throw MockServerError.systemCall(name: "getsockname", code: errno) }
+      port = Int(UInt16(bigEndian: address.sin_port))
+    case .ipv6:
+      var address = sockaddr_in6()
+      address.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+      address.sin6_family = sa_family_t(AF_INET6)
+      _ = inet_pton(AF_INET6, "::1", &address.sin6_addr)
+      let bound = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+          Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in6>.size))
+        }
+      }
+      guard bound == 0 else { throw MockServerError.systemCall(name: "bind", code: errno) }
+      var length = socklen_t(MemoryLayout<sockaddr_in6>.size)
+      let named = withUnsafeMutablePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+          getsockname(descriptor, $0, &length)
+        }
+      }
+      guard named == 0 else { throw MockServerError.systemCall(name: "getsockname", code: errno) }
+      port = Int(UInt16(bigEndian: address.sin6_port))
+    }
+
+    transfersDescriptor = true
+    return (descriptor, port)
   }
 
   private func connection(

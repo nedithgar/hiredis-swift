@@ -24,7 +24,8 @@ reports the pinned release tag, `1.4.1`.
 
 ## Vendored files
 
-The following upstream files are byte-for-byte copies from the archive:
+The following upstream files are copied from the archive. All remain
+byte-for-byte copies except for the local `net.c` patch documented below:
 
 - Compiled C sources: `alloc.c`, `async.c`, `hiredis.c`, `net.c`, `read.c`,
   `sds.c`, and `sockcompat.c`.
@@ -46,33 +47,69 @@ metadata, event-loop adapters, and TLS/OpenSSL sources are not vendored.
 
 ## Modifications and Apple integration
 
-There are no modifications to files under `Sources/CHiredis/Vendor/hiredis`
-or to the copied public hiredis headers.
+One local patch is applied to `Sources/CHiredis/Vendor/hiredis/net.c`.
+All other vendored sources and the copied public hiredis headers are unchanged.
 
 `Sources/CHiredis/CHiredis.c` and `Sources/CHiredis/include/CHiredis.h` are
 original MIT-licensed integration files. They configure close-on-exec sockets,
 preserve RESP3 push replies for Swift conversion, expose read-only reply
-accessors, and classify Darwin's `SO_RCVTIMEO` result (`EAGAIN` /
-`EWOULDBLOCK`) as a command timeout. That classification is kept outside the
-upstream source so the vendor snapshot remains pristine.
+accessors, and classify connect-poll expiry (`ETIMEDOUT`) and Darwin's blocking
+socket timeout result (`EAGAIN` / `EWOULDBLOCK`) for the Swift
+operation-specific timeout adapter. Timeout classification remains in the
+integration layer.
 
-No Apple-platform source patch is currently required.
+### Darwin connection-error preservation
+
+Darwin can return `EISCONN` from a repeated `connect()` while a failed
+connection still has a pending `SO_ERROR`, such as `ECONNREFUSED`. Upstream
+`redisCheckConnectDone` accepts `EISCONN` as successful completion, allowing a
+later socket-configuration error to obscure the original connection failure.
+
+The local patch reads `SO_ERROR` before repeating `connect()` and returns a
+pending failure through `errno`, allowing `redisCheckSocketError` to record
+the original cause. It belongs in the internal connection-completion path
+because this check must precede both the repeated `connect()` and subsequent
+socket configuration.
+
+Exact diff against the pinned `v1.4.1` source (without context lines):
+
+```diff
+--- a/Sources/CHiredis/Vendor/hiredis/net.c
++++ b/Sources/CHiredis/Vendor/hiredis/net.c
+@@ -338,0 +339,11 @@ int redisCheckConnectDone(redisContext *c, int *completed) {
++    int socket_error = 0;
++    socklen_t error_length = sizeof(socket_error);
++    /* Darwin can report EISCONN from a repeated connect while a failed
++     * connection still has a pending SO_ERROR. Preserve that error before
++     * interpreting connect's result or configuring the socket. */
++    if (getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_length) == -1)
++        return REDIS_ERR;
++    if (socket_error != 0) {
++        errno = socket_error;
++        return REDIS_ERR;
++    }
+```
+
+`ConnectionTests.refusedConnectionPreservesSocketCause` verifies the original
+refusal cause across repeated IPv4 and IPv6 connection attempts.
+`ConnectionTests.connectionTimeoutPreservesOperation` separately verifies the
+integration layer's connect-timeout classification and failed-context cleanup.
 
 ## Known Xcode diagnostics
 
 Xcode 26.6's generated Swift-package scheme builds this snapshot successfully,
 but its default `CLANG_WARN_SHORTEN_64_TO_32` setting reports 14 distinct
-implicit narrowing warnings in the untouched upstream C sources (`async.c`,
+implicit narrowing warnings in the upstream C sources (`async.c`,
 `hiredis.c`, `net.c`, `read.c`, and `sds.c`). A universal generic macOS build
 emits each warning once per architecture, for 28 warning lines. The
 corresponding `swift build`, `swift test`, and `swift build -c release` commands
 complete without warnings.
 
-The package deliberately neither patches the vendored source nor adds SwiftPM
-`unsafeFlags` to hide these diagnostics. A future upstream release should be
-reevaluated for fixes before changing this policy. Consumers that promote all C
-warnings to errors may need an upstream remediation before enabling that policy
-for `CHiredis`.
+The package leaves these upstream narrowing conversions unchanged and does not
+add SwiftPM `unsafeFlags` to hide their diagnostics. A future upstream release
+should be reevaluated for fixes before changing this policy. Consumers that
+promote all C warnings to errors may need an upstream remediation before
+enabling that policy for `CHiredis`.
 
 ## Git-tracked vendored updates
 
@@ -94,8 +131,11 @@ a Git submodule or require an upstream Git checkout:
    only when the upstream core-library build requires it. Do not copy tests,
    tools, examples, benchmarks, or unrelated adapters.
 6. Compare every copied upstream file byte-for-byte with the extracted
-   archive. Keep any unavoidable platform change outside the vendor directory
-   when possible; otherwise document its exact diff and rationale here.
+   archive. Reevaluate the local connection-error patch above: remove it if
+   upstream fixes the same behavior; otherwise reapply the required change and
+   verify the IPv4 and IPv6 regression tests. Keep any unavoidable platform
+   change outside the vendor directory when possible; otherwise document its
+   exact diff and rationale here.
 7. Replace `LICENSES/hiredis-BSD-3-Clause.txt` with the release's complete
    license. Recheck every vendored file for additional copyright holders or
    license terms, refresh or remove `LICENSES/ffc-MIT.txt` as appropriate for
