@@ -49,13 +49,13 @@ int chiredisContextErrorIsTimeout(const redisContext *context) {
   }
 
   /*
-   * Darwin reports a blocking SO_RCVTIMEO expiry as EAGAIN/EWOULDBLOCK.
-   * hiredis 1.4.1 classifies only ETIMEDOUT as REDIS_ERR_TIMEOUT, so retain
-   * that thread-local errno long enough for the Swift error adapter to
-   * provide the promised timeout category without modifying upstream code.
+   * hiredis can report a connect poll deadline as REDIS_ERR_IO/ETIMEDOUT.
+   * Darwin also reports a blocking SO_RCVTIMEO expiry as EAGAIN/EWOULDBLOCK.
+   * Preserve those errno categories for the Swift operation-specific adapter.
    */
-  return context->err == REDIS_ERR_IO && context->command_timeout != NULL &&
-         (errno == EAGAIN || errno == EWOULDBLOCK);
+  return context->err == REDIS_ERR_IO &&
+         (errno == ETIMEDOUT ||
+          (context->command_timeout != NULL && (errno == EAGAIN || errno == EWOULDBLOCK)));
 }
 
 const char *chiredisContextErrorString(const redisContext *context) {

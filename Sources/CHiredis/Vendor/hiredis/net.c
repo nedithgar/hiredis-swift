@@ -336,6 +336,17 @@ static int redisContextWaitReady(redisContext *c, long msec) {
 }
 
 int redisCheckConnectDone(redisContext *c, int *completed) {
+    int socket_error = 0;
+    socklen_t error_length = sizeof(socket_error);
+    /* Darwin can report EISCONN from a repeated connect while a failed
+     * connection still has a pending SO_ERROR. Preserve that error before
+     * interpreting connect's result or configuring the socket. */
+    if (getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_length) == -1)
+        return REDIS_ERR;
+    if (socket_error != 0) {
+        errno = socket_error;
+        return REDIS_ERR;
+    }
     int rc = connect(c->fd, (const struct sockaddr *)c->saddr, c->addrlen);
     if (rc == 0) {
         *completed = 1;
